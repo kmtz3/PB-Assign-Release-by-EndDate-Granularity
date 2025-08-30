@@ -28,6 +28,8 @@ const log = {
   warn: (...a) => console.warn("❗", ...a),
   err:  (...a) => console.error("❌", ...a),
 };
+const DEBUG = process.env.PB_DEBUG === "1";
+const dbg = (...a) => DEBUG && console.log("🐞", ...a);
 
 // --- Helpers ---
 const parseIsoDate = (s) => (s ? new Date(s) : undefined);
@@ -264,42 +266,62 @@ async function setFeatureAssignment(featureId, releaseId, assigned) {
 
 // --- Webhook receiver ---
 app.post("/pb-webhook", async (req, res) => {
+  const t0 = Date.now();
   try {
+    // 1) Auth check (PB sends exactly the value you configured)
     const auth = req.get("authorization") || "";
     if (auth !== `Bearer ${WEBHOOK_AUTH}`) {
-      log.warn("Unauthorized webhook call");
+      log.warn("Unauthorized webhook call", { got: auth ? auth.slice(0, 12) + "…" : "<empty>" });
       return res.status(401).send("unauthorized");
     }
 
-    const eventType = req.body?.data?.type || req.body?.type;
+    // 2) Basic intake logs (size + top-level fields)
+    const body = req.body || {};
+    const size = Number(req.get("content-length") || 0);
+    dbg("📥 Webhook received", { size, keys: Object.keys(body) });
+
+    // 3) Event & entity extraction (covering multiple payload shapes)
+    const eventType = body?.data?.type || body?.type;
     const featureId =
-      req.body?.data?.attributes?.entity?.feature?.id ||
-      req.body?.data?.attributes?.entity?.id ||
-      req.body?.data?.entity?.id ||
-      req.body?.entity?.id;
+      body?.data?.attributes?.entity?.feature?.id ||
+      body?.data?.attributes?.entity?.id ||
+      body?.data?.entity?.id ||
+      body?.entity?.id;
 
-    log.info(`📬 PB Webhook: type=${eventType} featureId=${featureId}`);
+    log.info(`📬 PB Webhook: type=${eventType ?? "<?>"} featureId=${featureId ?? "<?>"} size=${size}B`);
 
+    // 4) Sanity: is it a feature change event?
+    if (!eventType) {
+      log.warn("No event type in payload, ignoring");
+      return res.status(204).send("no event type");
+    }
     if (!["feature.updated", "feature.created"].includes(eventType)) {
-      return res.status(204).end();
-    }
-    if (!featureId) {
-      log.warn("No feature id in webhook payload");
-      return res.status(400).send("bad payload");
+      dbg("Ignoring non-feature event", { eventType });
+      return res.status(204).send("ignored event");
     }
 
-    // Thin payloads: always refetch the feature
+    // 5) Need a feature id
+    if (!featureId) {
+      log.warn("No feature id in webhook payload", { snippet: JSON.stringify(body).slice(0, 400) });
+      return res.status(400).send("bad payload (no feature id)");
+    }
+
+    // 6) Fetch latest feature (thin payloads)
     const feature = await getFeature(featureId);
     log.link(`🔗 Feature: ${feature.links?.html ?? feature.links?.self ?? feature.id}`);
 
+    // 7) Assign within each group (day-only, closed interval)
     const cache = {};
     await upsertAssignmentForGroup(feature, "weekly", cache);
     await upsertAssignmentForGroup(feature, "monthly", cache);
     await upsertAssignmentForGroup(feature, "quarterly", cache);
 
+    const dt = Date.now() - t0;
+    log.info(`✅ Done in ${dt} ms`);
     return res.status(200).send("ok");
   } catch (err) {
-    log.err("Handler error:", err?.message);
+    const dt = Date.now() - t0;
+    log.err("Handler error:", err?.message, `(${dt} ms)`);
     return res.status(500).send("internal");
   }
 });
