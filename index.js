@@ -270,7 +270,8 @@ app.post("/pb-webhook", async (req, res) => {
   try {
     // 1) Auth check (PB sends exactly the value you configured)
     const auth = req.get("authorization") || "";
-    if (auth !== `Bearer ${WEBHOOK_AUTH}`) {
+    const expectedAuth = WEBHOOK_AUTH.startsWith("Bearer ") ? WEBHOOK_AUTH : `Bearer ${WEBHOOK_AUTH}`;
+    if (auth !== expectedAuth && auth !== WEBHOOK_AUTH) {
       log.warn("Unauthorized webhook call", { got: auth ? auth.slice(0, 12) + "…" : "<empty>" });
       return res.status(401).send("unauthorized");
     }
