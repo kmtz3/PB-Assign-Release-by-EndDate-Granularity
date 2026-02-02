@@ -196,7 +196,9 @@ async function ensureSeedForGroup(groupId, periods, existingReleases, createdAcc
     }
     const created = await createRelease({ name: p.name, groupId, start: p.start, end: p.end, granularity });
     createdAccumulator.push(created);
-    log.info(`✅ Created: ${created.name} → [${created.timeframe.startDate} … ${created.timeframe.endDate}]`);
+    const tfStart = created.timeframe?.startDate || isoString(p.start);
+    const tfEnd = created.timeframe?.endDate || isoString(p.end);
+    log.info(`✅ Created: ${created.name || p.name} → [${tfStart} … ${tfEnd}]`);
   }
 }
 
