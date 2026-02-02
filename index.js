@@ -297,10 +297,10 @@ async function createReleaseV2({ name, groupId, start, end }) {
     body: JSON.stringify({
       data: {
         type: "release",
+        parent: { id: groupId },
         fields: {
           name,
           description: "",
-          parent: { id: groupId },
           timeframe: { startDate: isoString(start), endDate: isoString(end) }
         }
       }
