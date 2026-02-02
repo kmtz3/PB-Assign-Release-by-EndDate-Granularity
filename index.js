@@ -87,8 +87,9 @@ async function createRelease({ name, groupId, start, end }) {
     body: JSON.stringify({
       data: {
         name,
+        description: "",
         releaseGroup: { id: groupId },
-        timeframe: { start: isoString(start), end: isoString(end) }
+        timeframe: { startDate: isoString(start), endDate: isoString(end) }
       }
     })
   });
@@ -100,7 +101,10 @@ async function createRelease({ name, groupId, start, end }) {
 function releaseWithTimeframeExists(existingReleases, start, end) {
   const s = toYMDUTC(start);
   const e = toYMDUTC(end);
-  return existingReleases.some(r => toYMDUTC(r.timeframe?.start) === s && toYMDUTC(r.timeframe?.end) === e);
+  return existingReleases.some(r =>
+    toYMDUTC(r.timeframe?.startDate || r.timeframe?.start) === s &&
+    toYMDUTC(r.timeframe?.endDate || r.timeframe?.end) === e
+  );
 }
 
 /** Seed Monthly periods from start to end (inclusive by day) */
@@ -191,13 +195,13 @@ async function ensureSeedForGroup(groupId, periods, existingReleases, createdAcc
     }
     const created = await createRelease({ name: p.name, groupId, start: p.start, end: p.end });
     createdAccumulator.push(created);
-    log.info(`✅ Created: ${created.name} → [${created.timeframe.start} … ${created.timeframe.end}]`);
+    log.info(`✅ Created: ${created.name} → [${created.timeframe.startDate} … ${created.timeframe.endDate}]`);
   }
 }
 
 /** Ensure exactly one assignment within a group based on feature.timeframe.end (day-only semantics) */
 async function upsertAssignmentForGroup(feature, groupLabel, cache) {
-  const featureEnd = parseIsoDate(feature.timeframe?.end);
+  const featureEnd = parseIsoDate(feature.timeframe?.endDate || feature.timeframe?.end);
   if (!featureEnd) {
     log.warn(`🎯 ${groupLabel}: feature has no timeframe.end; skipping assignment`);
     return;
@@ -213,11 +217,11 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
   }
 
   const target = releases.find(r =>
-    isWithinClosedDay(featureEnd, r.timeframe?.start, r.timeframe?.end)
+    isWithinClosedDay(featureEnd, r.timeframe?.startDate || r.timeframe?.start, r.timeframe?.endDate || r.timeframe?.end)
   );
 
   if (!target) {
-    log.warn(`🎯 ${groupLabel}: no matching release for end=${feature.timeframe?.end}`);
+    log.warn(`🎯 ${groupLabel}: no matching release for end=${feature.timeframe?.endDate || feature.timeframe?.end}`);
     return;
   }
 
