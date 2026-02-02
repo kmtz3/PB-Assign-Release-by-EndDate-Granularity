@@ -306,11 +306,14 @@ async function createReleaseV2({ name, groupId, start, end, granularity }) {
             granularity: granularity || "day"
           }
         },
-        relationships: {
-          parent: {
-            data: { id: groupId }
+        relationships: [
+          {
+            type: "parent",
+            target: {
+              id: groupId
+            }
           }
-        }
+        ]
       }
     })
   });
