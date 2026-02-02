@@ -81,7 +81,7 @@ function isWithinClosedDay(d, start, end) {
 }
 
 /** Create a PB release in a group (V1 API) */
-async function createReleaseV1({ name, groupId, start, end }) {
+async function createReleaseV1({ name, groupId, start, end, granularity }) {
   const r = await fetch(`${PB_BASE}/releases`, {
     method: "POST",
     headers: COMMON_HEADERS,
@@ -188,13 +188,13 @@ function buildQuarterlyPeriods(rangeStart, rangeEnd, anchorMonth1to12) {
 }
 
 /** Ensure seed for a group, creating missing [start,end] periods only */
-async function ensureSeedForGroup(groupId, periods, existingReleases, createdAccumulator) {
+async function ensureSeedForGroup(groupId, periods, existingReleases, createdAccumulator, granularity) {
   for (const p of periods) {
     if (releaseWithTimeframeExists(existingReleases, p.start, p.end)) {
       log.info(`♻️  Exists: ${p.name} (${p.start.toISOString()} – ${p.end.toISOString()})`);
       continue;
     }
-    const created = await createRelease({ name: p.name, groupId, start: p.start, end: p.end });
+    const created = await createRelease({ name: p.name, groupId, start: p.start, end: p.end, granularity });
     createdAccumulator.push(created);
     log.info(`✅ Created: ${created.name} → [${created.timeframe.startDate} … ${created.timeframe.endDate}]`);
   }
@@ -290,7 +290,7 @@ async function getFeatureV2(id) {
 }
 
 /** Create a PB release in a group (V2 API) */
-async function createReleaseV2({ name, groupId, start, end }) {
+async function createReleaseV2({ name, groupId, start, end, granularity }) {
   // Step 1: Create the release
   const r = await fetch(`${PB_BASE}/entities`, {
     method: "POST",
@@ -301,7 +301,11 @@ async function createReleaseV2({ name, groupId, start, end }) {
         fields: {
           name,
           description: "",
-          timeframe: { startDate: isoString(start), endDate: isoString(end) }
+          timeframe: {
+            startDate: isoString(start),
+            endDate: isoString(end),
+            granularity: granularity || "day"
+          }
         }
       }
     })
@@ -532,9 +536,9 @@ app.post("/admin/seed-releases", async (req, res) => {
     const monthly = buildMonthlyPeriods(rangeStart, rangeEnd);
     const quarterly = buildQuarterlyPeriods(rangeStart, rangeEnd, anchorMonthEnv);
 
-    await ensureSeedForGroup(RG_IDS.weekly, weekly, weeklyReleases, created);
-    await ensureSeedForGroup(RG_IDS.monthly, monthly, monthlyReleases, created);
-    await ensureSeedForGroup(RG_IDS.quarterly, quarterly, quarterlyReleases, created);
+    await ensureSeedForGroup(RG_IDS.weekly, weekly, weeklyReleases, created, "day");
+    await ensureSeedForGroup(RG_IDS.monthly, monthly, monthlyReleases, created, "month");
+    await ensureSeedForGroup(RG_IDS.quarterly, quarterly, quarterlyReleases, created, "quarter");
 
     res.status(200).json({
       rangeStart: isoString(rangeStart),
