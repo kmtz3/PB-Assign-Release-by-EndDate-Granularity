@@ -291,7 +291,6 @@ async function getFeatureV2(id) {
 
 /** Create a PB release in a group (V2 API) */
 async function createReleaseV2({ name, groupId, start, end, granularity }) {
-  // Step 1: Create the release
   const r = await fetch(`${PB_BASE}/entities`, {
     method: "POST",
     headers: COMMON_HEADERS,
@@ -306,24 +305,17 @@ async function createReleaseV2({ name, groupId, start, end, granularity }) {
             endDate: isoString(end),
             granularity: granularity || "day"
           }
+        },
+        relationships: {
+          parent: {
+            data: { id: groupId }
+          }
         }
       }
     })
   });
   if (!r.ok) throw new Error(`POST /entities -> ${r.status} ${await r.text()}`);
   const created = (await r.json()).data;
-
-  // Step 2: Set the parent relationship
-  const relResp = await fetch(`${PB_BASE}/entities/${created.id}/relationships/parent`, {
-    method: "PUT",
-    headers: COMMON_HEADERS,
-    body: JSON.stringify({
-      data: {
-        target: { id: groupId }
-      }
-    })
-  });
-  if (!relResp.ok) throw new Error(`PUT parent relationship -> ${relResp.status} ${await relResp.text()}`);
 
   // Normalize v2 structure to match v1
   return {
