@@ -275,7 +275,18 @@ async function setFeatureAssignmentV1(featureId, releaseId, assigned) {
 async function getFeatureV2(id) {
   const r = await fetch(`${PB_BASE}/entities/${id}`, { headers: COMMON_HEADERS });
   if (!r.ok) throw new Error(`GET /entities/${id} -> ${r.status} ${await r.text()}`);
-  return (await r.json()).data;
+  const data = (await r.json()).data;
+  // Normalize v2 structure to match v1 - flatten fields to top level for compatibility
+  return {
+    id: data.id,
+    type: data.type,
+    name: data.fields?.name,
+    timeframe: data.fields?.timeframe,
+    status: data.fields?.status,
+    owner: data.fields?.owner,
+    links: data.links,
+    ...data
+  };
 }
 
 /** Create a PB release in a group (V2 API) */
@@ -294,7 +305,14 @@ async function createReleaseV2({ name, groupId, start, end }) {
     })
   });
   if (!r.ok) throw new Error(`POST /entities -> ${r.status} ${await r.text()}`);
-  return (await r.json()).data;
+  const data = (await r.json()).data;
+  // Normalize v2 structure to match v1
+  return {
+    id: data.id,
+    name: data.fields?.name,
+    timeframe: data.fields?.timeframe,
+    ...data
+  };
 }
 
 /** List all releases in a group (V2 API) */
@@ -302,18 +320,25 @@ async function listReleasesForGroupV2(groupId) {
   const out = [];
   let cursor = null;
   do {
-    const url = cursor ? `${PB_BASE}/entities/search?cursor=${cursor}` : `${PB_BASE}/entities/search`;
+    const url = cursor
+      ? `${PB_BASE}/entities/search?type=release&cursor=${cursor}`
+      : `${PB_BASE}/entities/search?type=release`;
     const r = await fetch(url, {
       method: "POST",
       headers: COMMON_HEADERS,
       body: JSON.stringify({
-        type: "release",
-        filters: { parent: { id: groupId } }
+        parent: { id: groupId }
       })
     });
     if (!r.ok) throw new Error(`POST /entities/search -> ${r.status} ${await r.text()}`);
     const j = await r.json();
-    out.push(...(j.data ?? []));
+    const releases = (j.data ?? []).map(rel => ({
+      id: rel.id,
+      name: rel.fields?.name,
+      timeframe: rel.fields?.timeframe,
+      ...rel
+    }));
+    out.push(...releases);
     cursor = j.pagination?.next;
   } while (cursor);
   return out;
