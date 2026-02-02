@@ -295,12 +295,14 @@ async function createReleaseV2({ name, groupId, start, end }) {
     method: "POST",
     headers: COMMON_HEADERS,
     body: JSON.stringify({
-      type: "release",
-      fields: {
-        name,
-        description: "",
-        parent: { id: groupId },
-        timeframe: { startDate: isoString(start), endDate: isoString(end) }
+      data: {
+        type: "release",
+        fields: {
+          name,
+          description: "",
+          parent: { id: groupId },
+          timeframe: { startDate: isoString(start), endDate: isoString(end) }
+        }
       }
     })
   });
@@ -372,7 +374,12 @@ async function setFeatureAssignmentV2(featureId, releaseId, assigned, groupId) {
     const r = await fetch(`${PB_BASE}/entities/${featureId}/relationships`, {
       method: "POST",
       headers: COMMON_HEADERS,
-      body: JSON.stringify({ type: "link", target: { id: releaseId } })
+      body: JSON.stringify({
+        data: {
+          type: "link",
+          target: { id: releaseId }
+        }
+      })
     });
     if (!r.ok) throw new Error(`POST relationships -> ${r.status} ${await r.text()}`);
     return (await r.json()).data;
