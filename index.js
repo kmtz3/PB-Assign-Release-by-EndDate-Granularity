@@ -280,6 +280,8 @@ app.post("/pb-webhook", async (req, res) => {
     const body = req.body || {};
     const size = Number(req.get("content-length") || 0);
     dbg("📥 Webhook received", { size, keys: Object.keys(body) });
+    // Temporary: log full payload to understand structure
+    log.info("📦 Full webhook payload:", JSON.stringify(body, null, 2));
 
     // 3) Event & entity extraction (covering multiple payload shapes)
     const eventType = body?.data?.type || body?.type;
