@@ -5,7 +5,8 @@ const app = express();
 app.use(express.json({ type: "*/*" })); // PB sends application/json
 
 // --- Config ---
-const PB_BASE = "https://api.productboard.com";
+const USE_V2_API = process.env.USE_V2_API === "true";
+const PB_BASE = USE_V2_API ? "https://api.productboard.com/v2" : "https://api.productboard.com";
 const PB_TOKEN = process.env.PRODUCTBOARD_API_TOKEN;
 const WEBHOOK_AUTH = process.env.PB_WEBHOOK_AUTH; // PB will send this in Authorization
 const RG_IDS = {
@@ -16,7 +17,7 @@ const RG_IDS = {
 
 const COMMON_HEADERS = {
   Authorization: `Bearer ${PB_TOKEN}`,
-  "X-Version": "1",
+  "X-Version": USE_V2_API ? "2" : "1",
   Accept: "application/json",
   "Content-Type": "application/json",
 };
@@ -79,8 +80,8 @@ function isWithinClosedDay(d, start, end) {
   return sy <= dy && dy <= ey;
 }
 
-/** Create a PB release in a group */
-async function createRelease({ name, groupId, start, end }) {
+/** Create a PB release in a group (V1 API) */
+async function createReleaseV1({ name, groupId, start, end }) {
   const r = await fetch(`${PB_BASE}/releases`, {
     method: "POST",
     headers: COMMON_HEADERS,
@@ -225,25 +226,25 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
     return;
   }
 
-  await setFeatureAssignment(feature.id, target.id, true);
+  await setFeatureAssignment(feature.id, target.id, true, groupId);
   log.info(`✅ Assigned to ${groupLabel} → ${target.name} (${target.id})`);
 
   for (const rls of releases.filter(r => r.id !== target.id)) {
     try {
-      await setFeatureAssignment(feature.id, rls.id, false);
+      await setFeatureAssignment(feature.id, rls.id, false, groupId);
     } catch (e) {
       log.warn(`🧹 Unassign ${groupLabel}/${rls.name} skipped: ${e.message}`);
     }
   }
 }
 
-async function getFeature(id) {
+async function getFeatureV1(id) {
   const r = await fetch(`${PB_BASE}/features/${id}`, { headers: COMMON_HEADERS });
   if (!r.ok) throw new Error(`GET /features/${id} -> ${r.status} ${await r.text()}`);
   return (await r.json()).data;
 }
 
-async function listReleasesForGroup(groupId) {
+async function listReleasesForGroupV1(groupId) {
   const out = [];
   let next = `${PB_BASE}/releases?releaseGroup.id=${groupId}`;
   while (next) {
@@ -256,8 +257,8 @@ async function listReleasesForGroup(groupId) {
   return out;
 }
 
-/** Assign or unassign a feature to a release (idempotent) */
-async function setFeatureAssignment(featureId, releaseId, assigned) {
+/** Assign or unassign a feature to a release (idempotent) - V1 API */
+async function setFeatureAssignmentV1(featureId, releaseId, assigned) {
   const url = `${PB_BASE}/feature-release-assignments/assignment?release.id=${releaseId}&feature.id=${featureId}`;
   const r = await fetch(url, {
     method: "PUT",
@@ -266,6 +267,118 @@ async function setFeatureAssignment(featureId, releaseId, assigned) {
   });
   if (!r.ok) throw new Error(`PUT /feature-release-assignments -> ${r.status} ${await r.text()}`);
   return (await r.json()).data;
+}
+
+// --- V2 API Functions ---
+
+/** Get feature by ID (V2 API) */
+async function getFeatureV2(id) {
+  const r = await fetch(`${PB_BASE}/entities/${id}`, { headers: COMMON_HEADERS });
+  if (!r.ok) throw new Error(`GET /entities/${id} -> ${r.status} ${await r.text()}`);
+  return (await r.json()).data;
+}
+
+/** Create a PB release in a group (V2 API) */
+async function createReleaseV2({ name, groupId, start, end }) {
+  const r = await fetch(`${PB_BASE}/entities`, {
+    method: "POST",
+    headers: COMMON_HEADERS,
+    body: JSON.stringify({
+      type: "release",
+      fields: {
+        name,
+        description: "",
+        parent: { id: groupId },
+        timeframe: { startDate: isoString(start), endDate: isoString(end) }
+      }
+    })
+  });
+  if (!r.ok) throw new Error(`POST /entities -> ${r.status} ${await r.text()}`);
+  return (await r.json()).data;
+}
+
+/** List all releases in a group (V2 API) */
+async function listReleasesForGroupV2(groupId) {
+  const out = [];
+  let cursor = null;
+  do {
+    const url = cursor ? `${PB_BASE}/entities/search?cursor=${cursor}` : `${PB_BASE}/entities/search`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: COMMON_HEADERS,
+      body: JSON.stringify({
+        type: "release",
+        filters: { parent: { id: groupId } }
+      })
+    });
+    if (!r.ok) throw new Error(`POST /entities/search -> ${r.status} ${await r.text()}`);
+    const j = await r.json();
+    out.push(...(j.data ?? []));
+    cursor = j.pagination?.next;
+  } while (cursor);
+  return out;
+}
+
+/** Assign or unassign a feature to a release (V2 API) */
+async function setFeatureAssignmentV2(featureId, releaseId, assigned, groupId) {
+  if (assigned) {
+    // First, remove any existing release links in this group
+    const existingRels = await fetch(`${PB_BASE}/entities/${featureId}/relationships?type=link`, {
+      headers: COMMON_HEADERS
+    });
+    if (existingRels.ok) {
+      const rels = (await existingRels.json()).data || [];
+      // Get all releases in this group to identify which relationships to remove
+      const groupReleases = await listReleasesForGroupV2(groupId);
+      const groupReleaseIds = new Set(groupReleases.map(r => r.id));
+
+      for (const rel of rels) {
+        if (groupReleaseIds.has(rel.target.id) && rel.target.id !== releaseId) {
+          await fetch(`${PB_BASE}/entities/${featureId}/relationships/link/${rel.target.id}`, {
+            method: "DELETE",
+            headers: COMMON_HEADERS
+          });
+        }
+      }
+    }
+
+    // Create new link
+    const r = await fetch(`${PB_BASE}/entities/${featureId}/relationships`, {
+      method: "POST",
+      headers: COMMON_HEADERS,
+      body: JSON.stringify({ type: "link", target: { id: releaseId } })
+    });
+    if (!r.ok) throw new Error(`POST relationships -> ${r.status} ${await r.text()}`);
+    return (await r.json()).data;
+  } else {
+    // Delete link
+    const r = await fetch(`${PB_BASE}/entities/${featureId}/relationships/link/${releaseId}`, {
+      method: "DELETE",
+      headers: COMMON_HEADERS
+    });
+    if (!r.ok && r.status !== 404) throw new Error(`DELETE relationship -> ${r.status} ${await r.text()}`);
+    return { deleted: true };
+  }
+}
+
+// --- Routing Functions (switch between V1 and V2) ---
+
+async function getFeature(id) {
+  return USE_V2_API ? getFeatureV2(id) : getFeatureV1(id);
+}
+
+async function createRelease(params) {
+  return USE_V2_API ? createReleaseV2(params) : createReleaseV1(params);
+}
+
+async function listReleasesForGroup(groupId) {
+  return USE_V2_API ? listReleasesForGroupV2(groupId) : listReleasesForGroupV1(groupId);
+}
+
+async function setFeatureAssignment(featureId, releaseId, assigned, groupId) {
+  return USE_V2_API
+    ? setFeatureAssignmentV2(featureId, releaseId, assigned, groupId)
+    : setFeatureAssignmentV1(featureId, releaseId, assigned);
 }
 
 // --- Webhook receiver ---
