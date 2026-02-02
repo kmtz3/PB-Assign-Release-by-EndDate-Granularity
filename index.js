@@ -320,14 +320,15 @@ async function listReleasesForGroupV2(groupId) {
   const out = [];
   let cursor = null;
   do {
-    const url = cursor
-      ? `${PB_BASE}/entities/search?type=release&cursor=${cursor}`
-      : `${PB_BASE}/entities/search?type=release`;
+    const url = cursor ? `${PB_BASE}/entities/search?cursor=${cursor}` : `${PB_BASE}/entities/search`;
     const r = await fetch(url, {
       method: "POST",
       headers: COMMON_HEADERS,
       body: JSON.stringify({
-        parent: { id: groupId }
+        data: {
+          type: "release",
+          parent: { id: groupId }
+        }
       })
     });
     if (!r.ok) throw new Error(`POST /entities/search -> ${r.status} ${await r.text()}`);
