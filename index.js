@@ -452,6 +452,18 @@ app.post("/pb-webhook", async (req, res) => {
       return res.status(204).send("ignored event");
     }
 
+    // 4b) Prevent feedback loop: only process if timeframe was actually updated
+    // When we assign features to releases, it triggers another webhook but without timeframe changes
+    const updatedAttributes = body?.data?.updatedAttributes || [];
+    if (eventType === "feature.updated" && Array.isArray(updatedAttributes)) {
+      // Check if timeframe was actually updated (or if it's a create, always process)
+      const isTimeframeUpdate = updatedAttributes.includes("timeframe");
+      if (!isTimeframeUpdate) {
+        dbg("Ignoring update without timeframe change", { updatedAttributes });
+        return res.status(204).send("no timeframe update");
+      }
+    }
+
     // 5) Need a feature id
     if (!featureId) {
       log.warn("No feature id in webhook payload", { snippet: JSON.stringify(body).slice(0, 400) });
