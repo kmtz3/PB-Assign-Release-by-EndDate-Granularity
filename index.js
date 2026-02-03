@@ -331,16 +331,9 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
     return;
   }
 
+  // setFeatureAssignment with assigned=true automatically removes old assignments in this group
   await setFeatureAssignment(feature.id, target.id, true, groupId);
   log.info(`✅ Assigned to ${groupLabel} → ${target.name} (${target.id})`);
-
-  for (const rls of releases.filter(r => r.id !== target.id)) {
-    try {
-      await setFeatureAssignment(feature.id, rls.id, false, groupId);
-    } catch (e) {
-      log.warn(`🧹 Unassign ${groupLabel}/${rls.name} skipped: ${e.message}`);
-    }
-  }
 }
 
 // --- API Functions ---
