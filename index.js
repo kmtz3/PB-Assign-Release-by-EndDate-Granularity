@@ -5,8 +5,7 @@ const app = express();
 app.use(express.json({ type: "*/*" })); // PB sends application/json
 
 // --- Config ---
-const USE_V2_API = process.env.USE_V2_API === "true";
-const PB_BASE = USE_V2_API ? "https://api.productboard.com/v2" : "https://api.productboard.com";
+const PB_BASE = "https://api.productboard.com/v2";
 const PB_TOKEN = process.env.PRODUCTBOARD_API_TOKEN;
 const WEBHOOK_AUTH = process.env.PB_WEBHOOK_AUTH; // PB will send this in Authorization
 const RG_IDS = {
@@ -17,7 +16,7 @@ const RG_IDS = {
 
 const COMMON_HEADERS = {
   Authorization: `Bearer ${PB_TOKEN}`,
-  "X-Version": USE_V2_API ? "2" : "1",
+  "X-Version": "2",
   Accept: "application/json",
   "Content-Type": "application/json",
 };
@@ -78,24 +77,6 @@ function isWithinClosedDay(d, start, end) {
   const sy = toYMDUTC(start);
   const ey = toYMDUTC(end);
   return sy <= dy && dy <= ey;
-}
-
-/** Create a PB release in a group (V1 API) */
-async function createReleaseV1({ name, groupId, start, end, granularity }) {
-  const r = await fetch(`${PB_BASE}/releases`, {
-    method: "POST",
-    headers: COMMON_HEADERS,
-    body: JSON.stringify({
-      data: {
-        name,
-        description: "",
-        releaseGroup: { id: groupId },
-        timeframe: { startDate: isoString(start), endDate: isoString(end) }
-      }
-    })
-  });
-  if (!r.ok) throw new Error(`POST /releases -> ${r.status} ${await r.text()}`);
-  return (await r.json()).data;
 }
 
 /** Returns true if a release with the exact same [start,end] exists in the group */
@@ -242,45 +223,14 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
   }
 }
 
-async function getFeatureV1(id) {
-  const r = await fetch(`${PB_BASE}/features/${id}`, { headers: COMMON_HEADERS });
-  if (!r.ok) throw new Error(`GET /features/${id} -> ${r.status} ${await r.text()}`);
-  return (await r.json()).data;
-}
+// --- API Functions ---
 
-async function listReleasesForGroupV1(groupId) {
-  const out = [];
-  let next = `${PB_BASE}/releases?releaseGroup.id=${groupId}`;
-  while (next) {
-    const r = await fetch(next, { headers: COMMON_HEADERS });
-    if (!r.ok) throw new Error(`GET /releases -> ${r.status} ${await r.text()}`);
-    const j = await r.json();
-    out.push(...(j.data ?? []));
-    next = j.links?.next;
-  }
-  return out;
-}
-
-/** Assign or unassign a feature to a release (idempotent) - V1 API */
-async function setFeatureAssignmentV1(featureId, releaseId, assigned) {
-  const url = `${PB_BASE}/feature-release-assignments/assignment?release.id=${releaseId}&feature.id=${featureId}`;
-  const r = await fetch(url, {
-    method: "PUT",
-    headers: COMMON_HEADERS,
-    body: JSON.stringify({ data: { assigned } }),
-  });
-  if (!r.ok) throw new Error(`PUT /feature-release-assignments -> ${r.status} ${await r.text()}`);
-  return (await r.json()).data;
-}
-
-// --- V2 API Functions ---
-
-/** Get feature by ID (V2 API) */
+/** Get feature by ID */
 async function getFeatureV2(id) {
   const r = await fetch(`${PB_BASE}/entities/${id}`, { headers: COMMON_HEADERS });
   if (!r.ok) throw new Error(`GET /entities/${id} -> ${r.status} ${await r.text()}`);
   const data = (await r.json()).data;
-  // Normalize v2 structure to match v1 - flatten fields to top level for compatibility
+  // Flatten fields to top level for convenience
   return {
     id: data.id,
     type: data.type,
@@ -293,7 +243,7 @@ async function getFeatureV2(id) {
   };
 }
 
-/** Create a PB release in a group (V2 API) */
+/** Create a PB release in a group */
 async function createReleaseV2({ name, groupId, start, end, granularity }) {
   const r = await fetch(`${PB_BASE}/entities`, {
     method: "POST",
@@ -324,7 +274,7 @@ async function createReleaseV2({ name, groupId, start, end, granularity }) {
   if (!r.ok) throw new Error(`POST /entities -> ${r.status} ${await r.text()}`);
   const created = (await r.json()).data;
 
-  // Normalize v2 structure to match v1 - spread first, then override with normalized fields
+  // Flatten fields to top level for convenience
   return {
     ...created,
     name: created.fields?.name,
@@ -332,7 +282,7 @@ async function createReleaseV2({ name, groupId, start, end, granularity }) {
   };
 }
 
-/** List all releases in a group (V2 API) */
+/** List all releases in a group */
 async function listReleasesForGroupV2(groupId) {
   const out = [];
   let cursor = null;
@@ -362,7 +312,7 @@ async function listReleasesForGroupV2(groupId) {
   return out;
 }
 
-/** Assign or unassign a feature to a release (V2 API) */
+/** Assign or unassign a feature to a release */
 async function setFeatureAssignmentV2(featureId, releaseId, assigned, groupId) {
   if (assigned) {
     // First, remove any existing release links in this group
@@ -409,24 +359,22 @@ async function setFeatureAssignmentV2(featureId, releaseId, assigned, groupId) {
   }
 }
 
-// --- Routing Functions (switch between V1 and V2) ---
+// --- API Wrapper Functions ---
 
 async function getFeature(id) {
-  return USE_V2_API ? getFeatureV2(id) : getFeatureV1(id);
+  return getFeatureV2(id);
 }
 
 async function createRelease(params) {
-  return USE_V2_API ? createReleaseV2(params) : createReleaseV1(params);
+  return createReleaseV2(params);
 }
 
 async function listReleasesForGroup(groupId) {
-  return USE_V2_API ? listReleasesForGroupV2(groupId) : listReleasesForGroupV1(groupId);
+  return listReleasesForGroupV2(groupId);
 }
 
 async function setFeatureAssignment(featureId, releaseId, assigned, groupId) {
-  return USE_V2_API
-    ? setFeatureAssignmentV2(featureId, releaseId, assigned, groupId)
-    : setFeatureAssignmentV1(featureId, releaseId, assigned);
+  return setFeatureAssignmentV2(featureId, releaseId, assigned, groupId);
 }
 
 // --- Webhook receiver ---
@@ -534,9 +482,9 @@ app.post("/admin/seed-releases", async (req, res) => {
     const monthly = buildMonthlyPeriods(rangeStart, rangeEnd);
     const quarterly = buildQuarterlyPeriods(rangeStart, rangeEnd, anchorMonthEnv);
 
-    await ensureSeedForGroup(RG_IDS.weekly, weekly, weeklyReleases, created, "day");
-    await ensureSeedForGroup(RG_IDS.monthly, monthly, monthlyReleases, created, "month");
-    await ensureSeedForGroup(RG_IDS.quarterly, quarterly, quarterlyReleases, created, "quarter");
+    await ensureSeedForGroup(RG_IDS.weekly, [...weekly].reverse(), weeklyReleases, created, "day");
+    await ensureSeedForGroup(RG_IDS.monthly, [...monthly].reverse(), monthlyReleases, created, "month");
+    await ensureSeedForGroup(RG_IDS.quarterly, [...quarterly].reverse(), quarterlyReleases, created, "quarter");
 
     res.status(200).json({
       rangeStart: isoString(rangeStart),
