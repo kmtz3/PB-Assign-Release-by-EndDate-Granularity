@@ -518,12 +518,13 @@ async function setFeatureAssignment(featureId, releaseId, assigned, groupId) {
 
 // --- Webhook receiver ---
 app.post("/pb-webhook", requireAuth, async (req, res) => {
+  const reqLog = logWithRequest(req);
   const t0 = Date.now();
   try {
     // 1) Basic intake logs (size + top-level fields)
     const body = req.body || {};
     const size = Number(req.get("content-length") || 0);
-    dbg("📥 Webhook received", { size, keys: Object.keys(body) });
+    dbg("📥 Webhook received", { size, keys: Object.keys(body), requestId: req.id });
 
     // 2) Event & entity extraction (covering multiple payload shapes)
     const eventType = body?.data?.eventType || body?.data?.type || body?.type;
@@ -534,15 +535,15 @@ app.post("/pb-webhook", requireAuth, async (req, res) => {
       body?.data?.entity?.id ||
       body?.entity?.id;
 
-    log.info(`📬 PB Webhook: type=${eventType ?? "<?>"} featureId=${featureId ?? "<?>"} size=${size}B`);
+    reqLog.info(`📬 PB Webhook: type=${eventType ?? "<?>"} featureId=${featureId ?? "<?>"} size=${size}B`);
 
     // 3) Sanity: is it a feature change event?
     if (!eventType) {
-      log.warn("No event type in payload, ignoring");
+      reqLog.warn("No event type in payload, ignoring");
       return res.status(204).send("no event type");
     }
     if (!["feature.updated", "feature.created"].includes(eventType)) {
-      dbg("Ignoring non-feature event", { eventType });
+      dbg("Ignoring non-feature event", { eventType, requestId: req.id });
       return res.status(204).send("ignored event");
     }
 
@@ -553,32 +554,32 @@ app.post("/pb-webhook", requireAuth, async (req, res) => {
       // Check if timeframe was actually updated (or if it's a create, always process)
       const isTimeframeUpdate = updatedAttributes.includes("timeframe");
       if (!isTimeframeUpdate) {
-        dbg("Ignoring update without timeframe change", { updatedAttributes });
+        dbg("Ignoring update without timeframe change", { updatedAttributes, requestId: req.id });
         return res.status(204).send("no timeframe update");
       }
     }
 
     // 4) Need a feature id
     if (!featureId) {
-      log.warn("No feature id in webhook payload", { snippet: JSON.stringify(body).slice(0, 400) });
+      reqLog.warn("No feature id in webhook payload", { snippet: JSON.stringify(body).slice(0, 400) });
       return res.status(400).send("bad payload (no feature id)");
     }
 
     // 5) All validation passed - respond immediately and process async
     const dt = Date.now() - t0;
-    log.info(`✅ Webhook accepted for processing (${dt} ms)`);
+    reqLog.info(`✅ Webhook accepted for processing (${dt} ms)`);
 
     // Respond immediately
     res.status(200).send("accepted");
 
-    // Process asynchronously (don't await)
-    processWebhookAsync(body, featureId, eventType).catch(err => {
+    // Process asynchronously (don't await) - pass requestId for correlation
+    processWebhookAsync(body, featureId, eventType, req.id).catch(err => {
       // Catch any unhandled errors from async processing
-      log.err("Unhandled error in async webhook processing:", err?.message);
+      reqLog.err("Unhandled error in async webhook processing:", err?.message);
     });
   } catch (err) {
     const dt = Date.now() - t0;
-    log.err("Handler error:", err?.message, `(${dt} ms)`);
+    reqLog.err("Handler error:", err?.message, `(${dt} ms)`);
     return res.status(500).send("internal");
   }
 });
@@ -587,12 +588,19 @@ app.post("/pb-webhook", requireAuth, async (req, res) => {
  * Process webhook payload asynchronously (called without await)
  * This allows the HTTP response to return immediately while processing continues
  */
-async function processWebhookAsync(body, featureId, eventType) {
+async function processWebhookAsync(body, featureId, eventType, requestId) {
   const t0 = Date.now();
+  // Create request-scoped logger for async processing
+  const reqLog = {
+    info: (msg, ...args) => logger.info({ ...formatLogArgs(args), requestId }, msg),
+    link: (msg, ...args) => logger.info({ ...formatLogArgs(args), requestId, type: 'link' }, msg),
+    err: (msg, ...args) => logger.error({ ...formatLogArgs(args), requestId }, msg),
+  };
+
   try {
     // 1) Fetch latest feature (thin payloads)
     const feature = await getFeature(featureId);
-    log.link(`🔗 Feature: ${feature.links?.html ?? feature.links?.self ?? feature.id}`);
+    reqLog.link(`🔗 Feature: ${feature.links?.html ?? feature.links?.self ?? feature.id}`);
 
     // 2) Assign within each group (day-only, closed interval)
     const cache = {};
@@ -602,10 +610,10 @@ async function processWebhookAsync(body, featureId, eventType) {
     await upsertAssignmentForGroup(feature, "yearly", cache);
 
     const dt = Date.now() - t0;
-    log.info(`✅ Async processing complete in ${dt} ms`);
+    reqLog.info(`✅ Async processing complete in ${dt} ms`);
   } catch (err) {
     const dt = Date.now() - t0;
-    log.err("Async processing error:", err?.message, `(${dt} ms)`);
+    reqLog.err("Async processing error:", err?.message, `(${dt} ms)`);
     // Note: We can't respond to webhook here since response was already sent
     // Error is logged but processing continues for other webhooks
   }
@@ -621,6 +629,7 @@ async function processWebhookAsync(body, featureId, eventType) {
  * - Stores timeframe at 00:00:00Z for both start and end (day-only canonical form).
  */
 app.post("/admin/seed-releases", requireAuth, async (req, res) => {
+  const reqLog = logWithRequest(req);
   try {
     const now = new Date();
     const rangeStart = startOfDayUTC(now);
@@ -655,14 +664,14 @@ app.post("/admin/seed-releases", requireAuth, async (req, res) => {
       } else {
         groupData[label].status = 'failed';
         groupData[label].error = result.reason?.message || 'Unknown error';
-        log.warn(`⏭️  Skipped ${label}: ${groupData[label].error}`);
+        reqLog.warn(`⏭️  Skipped ${label}: ${groupData[label].error}`);
       }
     });
 
     // Check if any groups are available
     const availableGroups = Object.values(groupData).filter(g => g.status === 'fetched').length;
     if (availableGroups === 0) {
-      log.err("❌ No release groups available for seeding");
+      reqLog.err("❌ No release groups available for seeding");
       return res.status(424).json({
         status: "failed",
         error: "No release groups available",
@@ -684,7 +693,7 @@ app.post("/admin/seed-releases", requireAuth, async (req, res) => {
     const failed = [];
 
     if (groupData.weekly.status === 'fetched') {
-      log.info(`📅 Seeding weekly releases...`);
+      reqLog.info(`📅 Seeding weekly releases...`);
       const beforeCount = created.length;
       await ensureSeedForGroup(RG_IDS.weekly, [...weekly].reverse(), groupData.weekly.releases, created, failed, "day");
       groupData.weekly.status = 'success';
@@ -692,7 +701,7 @@ app.post("/admin/seed-releases", requireAuth, async (req, res) => {
     }
 
     if (groupData.monthly.status === 'fetched') {
-      log.info(`📅 Seeding monthly releases...`);
+      reqLog.info(`📅 Seeding monthly releases...`);
       const beforeCount = created.length;
       await ensureSeedForGroup(RG_IDS.monthly, [...monthly].reverse(), groupData.monthly.releases, created, failed, "month");
       groupData.monthly.status = 'success';
@@ -700,7 +709,7 @@ app.post("/admin/seed-releases", requireAuth, async (req, res) => {
     }
 
     if (groupData.quarterly.status === 'fetched') {
-      log.info(`📅 Seeding quarterly releases...`);
+      reqLog.info(`📅 Seeding quarterly releases...`);
       const beforeCount = created.length;
       await ensureSeedForGroup(RG_IDS.quarterly, [...quarterly].reverse(), groupData.quarterly.releases, created, failed, "quarter");
       groupData.quarterly.status = 'success';
@@ -708,7 +717,7 @@ app.post("/admin/seed-releases", requireAuth, async (req, res) => {
     }
 
     if (groupData.yearly.status === 'fetched') {
-      log.info(`📅 Seeding yearly releases...`);
+      reqLog.info(`📅 Seeding yearly releases...`);
       const beforeCount = created.length;
       await ensureSeedForGroup(RG_IDS.yearly, [...yearly].reverse(), groupData.yearly.releases, created, failed, "year");
       groupData.yearly.status = 'success';
@@ -725,7 +734,7 @@ app.post("/admin/seed-releases", requireAuth, async (req, res) => {
     const overallStatus = successfulGroups === 4 ? 'success' :
                          successfulGroups > 0 ? 'partial_success' : 'failed';
 
-    log.info(`✅ Seeding complete: ${successfulGroups}/4 groups succeeded, ${totalCreated} releases created, ${totalFailed} failures`);
+    reqLog.info(`✅ Seeding complete: ${successfulGroups}/4 groups succeeded, ${totalCreated} releases created, ${totalFailed} failures`);
 
     // Return detailed response
     res.status(200).json({
@@ -753,7 +762,7 @@ app.post("/admin/seed-releases", requireAuth, async (req, res) => {
       ...(totalFailed > 0 && { failedCreations: failed })
     });
   } catch (e) {
-    log.err("Seeder failed:", e?.message);
+    reqLog.err("Seeder failed:", e?.message);
     res.status(500).json({
       status: "error",
       error: e?.message || "Internal server error"
