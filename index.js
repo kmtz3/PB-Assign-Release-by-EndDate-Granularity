@@ -12,6 +12,7 @@ const RG_IDS = {
   weekly: process.env.RELEASE_GROUP_WEEKLY_ID,
   monthly: process.env.RELEASE_GROUP_MONTHLY_ID,
   quarterly: process.env.RELEASE_GROUP_QUARTERLY_ID,
+  yearly: process.env.RELEASE_GROUP_YEARLY_ID,
 };
 
 const COMMON_HEADERS = {
@@ -164,6 +165,23 @@ function buildQuarterlyPeriods(rangeStart, rangeEnd, anchorMonth1to12) {
     const name = `Q${qIndex} ${qStart.getUTCFullYear()}`;
     periods.push({ name, start: qStart, end: qEnd });
     qStart = nextQuarterStart(qStart);
+  }
+  return periods;
+}
+
+/** Seed Yearly periods from start to end (inclusive by day) */
+function buildYearlyPeriods(rangeStart, rangeEnd) {
+  const periods = [];
+  // Start from the beginning of the year containing rangeStart
+  let year = rangeStart.getUTCFullYear();
+  const lastYear = rangeEnd.getUTCFullYear();
+
+  while (year <= lastYear) {
+    const start = startOfDayUTC(atUTC(year, 0, 1)); // Jan 1
+    const end = startOfDayUTC(atUTC(year, 11, 31)); // Dec 31
+    const name = `${year}`;
+    periods.push({ name, start, end });
+    year++;
   }
   return periods;
 }
@@ -442,6 +460,7 @@ app.post("/pb-webhook", async (req, res) => {
     await upsertAssignmentForGroup(feature, "weekly", cache);
     await upsertAssignmentForGroup(feature, "monthly", cache);
     await upsertAssignmentForGroup(feature, "quarterly", cache);
+    await upsertAssignmentForGroup(feature, "yearly", cache);
 
     const dt = Date.now() - t0;
     log.info(`✅ Done in ${dt} ms`);
@@ -454,7 +473,9 @@ app.post("/pb-webhook", async (req, res) => {
 });
 
 /**
- * Admin: seed weekly, monthly, and quarterly releases one year ahead from "today".
+ * Admin: seed weekly, monthly, quarterly, and yearly releases from "today".
+ * - Weekly, monthly, quarterly: 1 year ahead
+ * - Yearly: 5 years ahead
  * - Uses inclusive day bounds (closed intervals).
  * - Skips creation if a release with identical [start,end] already exists in the group.
  * - Quarterly anchor month can be overridden via env QUARTER_START_MONTH (1-12). Default Jan (1).
@@ -465,14 +486,16 @@ app.post("/admin/seed-releases", async (req, res) => {
     const now = new Date();
     const rangeStart = startOfDayUTC(now);
     const rangeEnd = endOfDayUTC(addDays(atUTC(now.getUTCFullYear() + 1, now.getUTCMonth(), now.getUTCDate()), 0));
+    const rangeEnd5Years = endOfDayUTC(addDays(atUTC(now.getUTCFullYear() + 5, now.getUTCMonth(), now.getUTCDate()), 0));
 
     const anchorMonthEnv = process.env.QUARTER_START_MONTH || "1"; // e.g., set to "8" to match Aug–Oct pattern
 
     // Fetch once per group
-    const [weeklyReleases, monthlyReleases, quarterlyReleases] = await Promise.all([
+    const [weeklyReleases, monthlyReleases, quarterlyReleases, yearlyReleases] = await Promise.all([
       listReleasesForGroup(RG_IDS.weekly),
       listReleasesForGroup(RG_IDS.monthly),
       listReleasesForGroup(RG_IDS.quarterly),
+      listReleasesForGroup(RG_IDS.yearly),
     ]);
 
     const created = [];
@@ -481,10 +504,12 @@ app.post("/admin/seed-releases", async (req, res) => {
     const weekly = buildWeeklyPeriods(rangeStart, rangeEnd);
     const monthly = buildMonthlyPeriods(rangeStart, rangeEnd);
     const quarterly = buildQuarterlyPeriods(rangeStart, rangeEnd, anchorMonthEnv);
+    const yearly = buildYearlyPeriods(rangeStart, rangeEnd5Years);
 
     await ensureSeedForGroup(RG_IDS.weekly, [...weekly].reverse(), weeklyReleases, created, "day");
     await ensureSeedForGroup(RG_IDS.monthly, [...monthly].reverse(), monthlyReleases, created, "month");
     await ensureSeedForGroup(RG_IDS.quarterly, [...quarterly].reverse(), quarterlyReleases, created, "quarter");
+    await ensureSeedForGroup(RG_IDS.yearly, [...yearly].reverse(), yearlyReleases, created, "year");
 
     res.status(200).json({
       rangeStart: isoString(rangeStart),
