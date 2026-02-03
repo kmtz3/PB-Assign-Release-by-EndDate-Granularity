@@ -507,11 +507,37 @@ app.post("/pb-webhook", async (req, res) => {
       return res.status(400).send("bad payload (no feature id)");
     }
 
-    // 6) Fetch latest feature (thin payloads)
+    // 6) All validation passed - respond immediately and process async
+    const dt = Date.now() - t0;
+    log.info(`✅ Webhook accepted for processing (${dt} ms)`);
+
+    // Respond immediately
+    res.status(200).send("accepted");
+
+    // Process asynchronously (don't await)
+    processWebhookAsync(body, featureId, eventType).catch(err => {
+      // Catch any unhandled errors from async processing
+      log.err("Unhandled error in async webhook processing:", err?.message);
+    });
+  } catch (err) {
+    const dt = Date.now() - t0;
+    log.err("Handler error:", err?.message, `(${dt} ms)`);
+    return res.status(500).send("internal");
+  }
+});
+
+/**
+ * Process webhook payload asynchronously (called without await)
+ * This allows the HTTP response to return immediately while processing continues
+ */
+async function processWebhookAsync(body, featureId, eventType) {
+  const t0 = Date.now();
+  try {
+    // 1) Fetch latest feature (thin payloads)
     const feature = await getFeature(featureId);
     log.link(`🔗 Feature: ${feature.links?.html ?? feature.links?.self ?? feature.id}`);
 
-    // 7) Assign within each group (day-only, closed interval)
+    // 2) Assign within each group (day-only, closed interval)
     const cache = {};
     await upsertAssignmentForGroup(feature, "weekly", cache);
     await upsertAssignmentForGroup(feature, "monthly", cache);
@@ -519,14 +545,14 @@ app.post("/pb-webhook", async (req, res) => {
     await upsertAssignmentForGroup(feature, "yearly", cache);
 
     const dt = Date.now() - t0;
-    log.info(`✅ Done in ${dt} ms`);
-    return res.status(200).send("ok");
+    log.info(`✅ Async processing complete in ${dt} ms`);
   } catch (err) {
     const dt = Date.now() - t0;
-    log.err("Handler error:", err?.message, `(${dt} ms)`);
-    return res.status(500).send("internal");
+    log.err("Async processing error:", err?.message, `(${dt} ms)`);
+    // Note: We can't respond to webhook here since response was already sent
+    // Error is logged but processing continues for other webhooks
   }
-});
+}
 
 /**
  * Admin: seed weekly, monthly, quarterly, and yearly releases from "today".
