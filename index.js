@@ -1,8 +1,17 @@
 import express from "express";
 import fetch from "node-fetch";
+import pino from 'pino';
+import { randomUUID } from 'crypto';
 
 const app = express();
 app.use(express.json({ type: "*/*" })); // PB sends application/json
+
+// Add request ID middleware
+app.use((req, res, next) => {
+  req.id = randomUUID();
+  res.setHeader('X-Request-ID', req.id);
+  next();
+});
 
 // --- Config ---
 const PB_BASE = "https://api.productboard.com/v2";
@@ -31,15 +40,71 @@ const COMMON_HEADERS = {
   "Content-Type": "application/json",
 };
 
-// --- Logging (quick-skim friendly) ---
+// --- Logging (structured with Pino) ---
+
+// Configure logger based on environment
+const isDevelopment = process.env.NODE_ENV === 'development';
+const logger = pino({
+  level: process.env.LOG_LEVEL || (isDevelopment ? 'debug' : 'info'),
+  transport: isDevelopment ? {
+    target: 'pino-pretty',
+    options: {
+      colorize: true,
+      ignore: 'pid,hostname',
+      translateTime: 'HH:MM:ss'
+    }
+  } : undefined // JSON output in production
+});
+
+// Helper to format variadic args into object
+function formatLogArgs(args) {
+  if (args.length === 0) return {};
+  if (args.length === 1 && typeof args[0] === 'object') return args[0];
+  return { details: args };
+}
+
+// Compatibility layer - keep existing API for global logs
 const log = {
-  info: (...a) => console.log("🟢", ...a),
-  link: (...a) => console.log("🔗", ...a),
-  warn: (...a) => console.warn("❗", ...a),
-  err:  (...a) => console.error("❌", ...a),
+  info: (msg, ...args) => logger.info(formatLogArgs(args), msg),
+  link: (msg, ...args) => logger.info({ ...formatLogArgs(args), type: 'link' }, msg),
+  warn: (msg, ...args) => logger.warn(formatLogArgs(args), msg),
+  err: (msg, ...args) => logger.error(formatLogArgs(args), msg),
 };
-const DEBUG = process.env.PB_DEBUG === "1";
-const dbg = (...a) => DEBUG && console.log("🐞", ...a);
+
+const DEBUG = process.env.PB_DEBUG === "1" || logger.level === 'debug';
+const dbg = (msg, ...args) => DEBUG && logger.debug(formatLogArgs(args), msg);
+
+// Request-scoped logger helper
+function logWithRequest(req) {
+  return {
+    info: (msg, ...args) => logger.info({ ...formatLogArgs(args), requestId: req.id }, msg),
+    link: (msg, ...args) => logger.info({ ...formatLogArgs(args), requestId: req.id, type: 'link' }, msg),
+    warn: (msg, ...args) => logger.warn({ ...formatLogArgs(args), requestId: req.id }, msg),
+    err: (msg, ...args) => logger.error({ ...formatLogArgs(args), requestId: req.id }, msg),
+  };
+}
+
+// --- Authentication Middleware ---
+
+/**
+ * Authentication middleware - validates Bearer token from Authorization header
+ * Supports both "Bearer <token>" and plain token formats
+ */
+function requireAuth(req, res, next) {
+  const auth = req.get("authorization") || "";
+  const expectedAuth = WEBHOOK_AUTH.startsWith("Bearer ") ? WEBHOOK_AUTH : `Bearer ${WEBHOOK_AUTH}`;
+
+  if (auth !== expectedAuth && auth !== WEBHOOK_AUTH) {
+    log.warn("Unauthorized request", {
+      endpoint: req.path,
+      ip: req.ip,
+      auth: auth ? auth.slice(0, 12) + "…" : "<empty>"
+    });
+    return res.status(401).json({ error: "unauthorized", message: "Invalid or missing authentication" });
+  }
+
+  next();
+}
 
 // --- Helpers ---
 const parseIsoDate = (s) => (s ? new Date(s) : undefined);
@@ -452,23 +517,15 @@ async function setFeatureAssignment(featureId, releaseId, assigned, groupId) {
 }
 
 // --- Webhook receiver ---
-app.post("/pb-webhook", async (req, res) => {
+app.post("/pb-webhook", requireAuth, async (req, res) => {
   const t0 = Date.now();
   try {
-    // 1) Auth check (PB sends exactly the value you configured)
-    const auth = req.get("authorization") || "";
-    const expectedAuth = WEBHOOK_AUTH.startsWith("Bearer ") ? WEBHOOK_AUTH : `Bearer ${WEBHOOK_AUTH}`;
-    if (auth !== expectedAuth && auth !== WEBHOOK_AUTH) {
-      log.warn("Unauthorized webhook call", { got: auth ? auth.slice(0, 12) + "…" : "<empty>" });
-      return res.status(401).send("unauthorized");
-    }
-
-    // 2) Basic intake logs (size + top-level fields)
+    // 1) Basic intake logs (size + top-level fields)
     const body = req.body || {};
     const size = Number(req.get("content-length") || 0);
     dbg("📥 Webhook received", { size, keys: Object.keys(body) });
 
-    // 3) Event & entity extraction (covering multiple payload shapes)
+    // 2) Event & entity extraction (covering multiple payload shapes)
     const eventType = body?.data?.eventType || body?.data?.type || body?.type;
     const featureId =
       body?.data?.id ||
@@ -479,7 +536,7 @@ app.post("/pb-webhook", async (req, res) => {
 
     log.info(`📬 PB Webhook: type=${eventType ?? "<?>"} featureId=${featureId ?? "<?>"} size=${size}B`);
 
-    // 4) Sanity: is it a feature change event?
+    // 3) Sanity: is it a feature change event?
     if (!eventType) {
       log.warn("No event type in payload, ignoring");
       return res.status(204).send("no event type");
@@ -489,7 +546,7 @@ app.post("/pb-webhook", async (req, res) => {
       return res.status(204).send("ignored event");
     }
 
-    // 4b) Prevent feedback loop: only process if timeframe was actually updated
+    // 3b) Prevent feedback loop: only process if timeframe was actually updated
     // When we assign features to releases, it triggers another webhook but without timeframe changes
     const updatedAttributes = body?.data?.updatedAttributes || [];
     if (eventType === "feature.updated" && Array.isArray(updatedAttributes)) {
@@ -501,13 +558,13 @@ app.post("/pb-webhook", async (req, res) => {
       }
     }
 
-    // 5) Need a feature id
+    // 4) Need a feature id
     if (!featureId) {
       log.warn("No feature id in webhook payload", { snippet: JSON.stringify(body).slice(0, 400) });
       return res.status(400).send("bad payload (no feature id)");
     }
 
-    // 6) All validation passed - respond immediately and process async
+    // 5) All validation passed - respond immediately and process async
     const dt = Date.now() - t0;
     log.info(`✅ Webhook accepted for processing (${dt} ms)`);
 
@@ -563,7 +620,7 @@ async function processWebhookAsync(body, featureId, eventType) {
  * - Quarterly anchor month can be overridden via env QUARTER_START_MONTH (1-12). Default Jan (1).
  * - Stores timeframe at 00:00:00Z for both start and end (day-only canonical form).
  */
-app.post("/admin/seed-releases", async (req, res) => {
+app.post("/admin/seed-releases", requireAuth, async (req, res) => {
   try {
     const now = new Date();
     const rangeStart = startOfDayUTC(now);
