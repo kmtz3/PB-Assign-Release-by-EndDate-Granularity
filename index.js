@@ -195,10 +195,12 @@ async function ensureSeedForGroup(groupId, periods, existingReleases, createdAcc
       continue;
     }
     const created = await createRelease({ name: p.name, groupId, start: p.start, end: p.end, granularity });
+    // Ensure name is set even if API doesn't return it
+    if (!created.name) created.name = p.name;
     createdAccumulator.push(created);
     const tfStart = created.timeframe?.startDate || isoString(p.start);
     const tfEnd = created.timeframe?.endDate || isoString(p.end);
-    log.info(`✅ Created: ${created.name || p.name} → [${tfStart} … ${tfEnd}]`);
+    log.info(`✅ Created: ${created.name} → [${tfStart} … ${tfEnd}]`);
   }
 }
 
@@ -322,12 +324,11 @@ async function createReleaseV2({ name, groupId, start, end, granularity }) {
   if (!r.ok) throw new Error(`POST /entities -> ${r.status} ${await r.text()}`);
   const created = (await r.json()).data;
 
-  // Normalize v2 structure to match v1
+  // Normalize v2 structure to match v1 - spread first, then override with normalized fields
   return {
-    id: created.id,
+    ...created,
     name: created.fields?.name,
-    timeframe: created.fields?.timeframe,
-    ...created
+    timeframe: created.fields?.timeframe
   };
 }
 
