@@ -234,13 +234,17 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
   }
 
   const groupId = RG_IDS[groupLabel];
-  if (!groupId) throw new Error(`Missing ENV for ${groupLabel} release group`);
+  if (!groupId) {
+    log.warn(`🎯 ${groupLabel}: Missing release group ID (check environment variables); skipping assignment`);
+    return;
+  }
 
   let releases = cache[groupId];
   if (!releases) {
     try {
       releases = await listReleasesForGroup(groupId);
       cache[groupId] = releases;
+      dbg(`🎯 ${groupLabel}: Fetched ${releases.length} releases`);
     } catch (err) {
       log.warn(`🎯 ${groupLabel}: Failed to fetch releases (${err.message}); skipping assignment`);
       return; // Skip this group gracefully
@@ -252,7 +256,13 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
   );
 
   if (!target) {
-    log.warn(`🎯 ${groupLabel}: no matching release for end=${feature.timeframe?.endDate || feature.timeframe?.end}`);
+    log.warn(`🎯 ${groupLabel}: no matching release for end=${feature.timeframe?.endDate || feature.timeframe?.end} (searched ${releases.length} releases)`);
+    if (DEBUG && releases.length > 0) {
+      dbg(`🎯 ${groupLabel}: Available release timeframes:`);
+      releases.slice(0, 5).forEach(r => {
+        dbg(`  - ${r.name}: ${r.timeframe?.startDate || r.timeframe?.start} to ${r.timeframe?.endDate || r.timeframe?.end}`);
+      });
+    }
     return;
   }
 
