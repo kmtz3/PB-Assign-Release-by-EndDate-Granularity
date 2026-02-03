@@ -763,6 +763,11 @@ app.post("/admin/seed-releases", requireAuth, async (req, res) => {
   }
 });
 
+// Health check endpoint for Docker/K8s
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
 // Bootstrap
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => log.info(`🟢 Listening on :${PORT}`));

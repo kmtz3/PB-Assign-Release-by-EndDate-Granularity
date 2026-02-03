@@ -3,3 +3,12 @@ npm-debug.log
 .git
 .gitignore
 .env
+.env.local
+README.md
+docker-compose.yml
+.dockerignore
+Dockerfile
+*.md
+.vscode
+.idea
+*.log

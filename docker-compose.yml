@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  pb-release-auto-assign:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pb-release-auto-assign
+    ports:
+      - "${PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # For development: mount source code (uncomment below)
+    # volumes:
+    #   - ./index.js:/app/index.js:ro
+    #   - ./package.json:/app/package.json:ro

@@ -169,11 +169,54 @@ curl -X POST http://localhost:8080/admin/seed-releases \
   -H "Authorization: Bearer super-secret-shared"
 ```
 
+### GET `/health`
+
+Health check endpoint for monitoring and container orchestration.
+
+**Authentication**: None required
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-02-04T12:34:56.789Z"
+}
+```
+
+**Status codes**:
+- `200 OK` - Service is healthy
+
+**Example**:
+```bash
+curl http://localhost:8080/health
+```
+
 ## Deployment
 
-### Docker
+### Docker Compose (Recommended)
 
-Build and run locally:
+The easiest way to run locally:
+
+```bash
+# Start the service
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop the service
+docker-compose down
+```
+
+The compose file automatically:
+- Loads environment variables from `.env`
+- Maps port 8080
+- Includes health checks
+- Restarts on failure
+
+### Docker (Manual)
+
+Build and run without compose:
 
 ```bash
 docker build -t pb-release-auto-assign .
