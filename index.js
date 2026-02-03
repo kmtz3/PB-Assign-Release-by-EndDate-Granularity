@@ -15,6 +15,15 @@ const RG_IDS = {
   yearly: process.env.RELEASE_GROUP_YEARLY_ID,
 };
 
+// Validate RG_IDS at startup
+const missingGroups = Object.entries(RG_IDS)
+  .filter(([_, id]) => !id)
+  .map(([name]) => name);
+
+if (missingGroups.length > 0) {
+  console.warn("❗ Missing release group IDs:", missingGroups.join(', '), "- these groups will be skipped during seeding");
+}
+
 const COMMON_HEADERS = {
   Authorization: `Bearer ${PB_TOKEN}`,
   "X-Version": "2",
@@ -187,19 +196,32 @@ function buildYearlyPeriods(rangeStart, rangeEnd) {
 }
 
 /** Ensure seed for a group, creating missing [start,end] periods only */
-async function ensureSeedForGroup(groupId, periods, existingReleases, createdAccumulator, granularity) {
+async function ensureSeedForGroup(groupId, periods, existingReleases, createdAccumulator, failedAccumulator, granularity) {
+  // Validate groupId
+  if (!groupId) {
+    log.warn("⏭️  Skipped: Release group has undefined ID (check environment variables)");
+    return;
+  }
+
   for (const p of periods) {
     if (releaseWithTimeframeExists(existingReleases, p.start, p.end)) {
       log.info(`♻️  Exists: ${p.name} (${p.start.toISOString()} – ${p.end.toISOString()})`);
       continue;
     }
-    const created = await createRelease({ name: p.name, groupId, start: p.start, end: p.end, granularity });
-    // Ensure name is set even if API doesn't return it
-    if (!created.name) created.name = p.name;
-    createdAccumulator.push(created);
-    const tfStart = created.timeframe?.startDate || isoString(p.start);
-    const tfEnd = created.timeframe?.endDate || isoString(p.end);
-    log.info(`✅ Created: ${created.name} → [${tfStart} … ${tfEnd}]`);
+
+    try {
+      const created = await createRelease({ name: p.name, groupId, start: p.start, end: p.end, granularity });
+      // Ensure name is set even if API doesn't return it
+      if (!created.name) created.name = p.name;
+      createdAccumulator.push(created);
+      const tfStart = created.timeframe?.startDate || isoString(p.start);
+      const tfEnd = created.timeframe?.endDate || isoString(p.end);
+      log.info(`✅ Created: ${created.name} → [${tfStart} … ${tfEnd}]`);
+    } catch (err) {
+      log.err(`❌ Failed to create release "${p.name}": ${err.message}`);
+      failedAccumulator.push({ name: p.name, error: err.message });
+      // Continue with next period instead of throwing
+    }
   }
 }
 
@@ -216,8 +238,13 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
 
   let releases = cache[groupId];
   if (!releases) {
-    releases = await listReleasesForGroup(groupId);
-    cache[groupId] = releases;
+    try {
+      releases = await listReleasesForGroup(groupId);
+      cache[groupId] = releases;
+    } catch (err) {
+      log.warn(`🎯 ${groupLabel}: Failed to fetch releases (${err.message}); skipping assignment`);
+      return; // Skip this group gracefully
+    }
   }
 
   const target = releases.find(r =>
@@ -302,6 +329,12 @@ async function createReleaseV2({ name, groupId, start, end, granularity }) {
 
 /** List all releases in a group */
 async function listReleasesForGroupV2(groupId) {
+  // Validate groupId
+  if (!groupId) {
+    dbg("listReleasesForGroup called with undefined groupId, returning empty array");
+    return [];
+  }
+
   const out = [];
   let cursor = null;
   do {
@@ -316,7 +349,20 @@ async function listReleasesForGroupV2(groupId) {
         }
       })
     });
+
+    // Graceful handling for 404/403
+    if (r.status === 404) {
+      dbg(`Release group ${groupId} not found (404), returning empty`);
+      return [];
+    }
+    if (r.status === 403) {
+      dbg(`Permission denied for release group ${groupId} (403), returning empty`);
+      return [];
+    }
+
+    // Throw on other errors (400, 500, etc.)
     if (!r.ok) throw new Error(`POST /entities/search -> ${r.status} ${await r.text()}`);
+
     const j = await r.json();
     const releases = (j.data ?? []).map(rel => ({
       id: rel.id,
@@ -488,17 +534,51 @@ app.post("/admin/seed-releases", async (req, res) => {
     const rangeEnd = endOfDayUTC(addDays(atUTC(now.getUTCFullYear() + 1, now.getUTCMonth(), now.getUTCDate()), 0));
     const rangeEnd5Years = endOfDayUTC(addDays(atUTC(now.getUTCFullYear() + 5, now.getUTCMonth(), now.getUTCDate()), 0));
 
-    const anchorMonthEnv = process.env.QUARTER_START_MONTH || "1"; // e.g., set to "8" to match Aug–Oct pattern
+    const anchorMonthEnv = process.env.QUARTER_START_MONTH || "1";
 
-    // Fetch once per group
-    const [weeklyReleases, monthlyReleases, quarterlyReleases, yearlyReleases] = await Promise.all([
+    // Fetch once per group - use Promise.allSettled for resilience
+    const groupLabels = ['weekly', 'monthly', 'quarterly', 'yearly'];
+    const fetchResults = await Promise.allSettled([
       listReleasesForGroup(RG_IDS.weekly),
       listReleasesForGroup(RG_IDS.monthly),
       listReleasesForGroup(RG_IDS.quarterly),
       listReleasesForGroup(RG_IDS.yearly),
     ]);
 
-    const created = [];
+    // Track results per group
+    const groupData = {
+      weekly: { releases: [], status: 'pending', error: null, created: 0 },
+      monthly: { releases: [], status: 'pending', error: null, created: 0 },
+      quarterly: { releases: [], status: 'pending', error: null, created: 0 },
+      yearly: { releases: [], status: 'pending', error: null, created: 0 }
+    };
+
+    // Process fetch results
+    fetchResults.forEach((result, idx) => {
+      const label = groupLabels[idx];
+      if (result.status === 'fulfilled') {
+        groupData[label].releases = result.value;
+        groupData[label].status = 'fetched';
+      } else {
+        groupData[label].status = 'failed';
+        groupData[label].error = result.reason?.message || 'Unknown error';
+        log.warn(`⏭️  Skipped ${label}: ${groupData[label].error}`);
+      }
+    });
+
+    // Check if any groups are available
+    const availableGroups = Object.values(groupData).filter(g => g.status === 'fetched').length;
+    if (availableGroups === 0) {
+      log.err("❌ No release groups available for seeding");
+      return res.status(424).json({
+        status: "failed",
+        error: "No release groups available",
+        message: "All release groups failed to fetch. Check environment variables and API permissions.",
+        groups: Object.fromEntries(
+          Object.entries(groupData).map(([k, v]) => [k, { status: v.status, error: v.error }])
+        )
+      });
+    }
 
     // Build periods
     const weekly = buildWeeklyPeriods(rangeStart, rangeEnd);
@@ -506,20 +586,85 @@ app.post("/admin/seed-releases", async (req, res) => {
     const quarterly = buildQuarterlyPeriods(rangeStart, rangeEnd, anchorMonthEnv);
     const yearly = buildYearlyPeriods(rangeStart, rangeEnd5Years);
 
-    await ensureSeedForGroup(RG_IDS.weekly, [...weekly].reverse(), weeklyReleases, created, "day");
-    await ensureSeedForGroup(RG_IDS.monthly, [...monthly].reverse(), monthlyReleases, created, "month");
-    await ensureSeedForGroup(RG_IDS.quarterly, [...quarterly].reverse(), quarterlyReleases, created, "quarter");
-    await ensureSeedForGroup(RG_IDS.yearly, [...yearly].reverse(), yearlyReleases, created, "year");
+    // Seed each group (only if fetched successfully)
+    const created = [];
+    const failed = [];
 
+    if (groupData.weekly.status === 'fetched') {
+      log.info(`📅 Seeding weekly releases...`);
+      const beforeCount = created.length;
+      await ensureSeedForGroup(RG_IDS.weekly, [...weekly].reverse(), groupData.weekly.releases, created, failed, "day");
+      groupData.weekly.status = 'success';
+      groupData.weekly.created = created.length - beforeCount;
+    }
+
+    if (groupData.monthly.status === 'fetched') {
+      log.info(`📅 Seeding monthly releases...`);
+      const beforeCount = created.length;
+      await ensureSeedForGroup(RG_IDS.monthly, [...monthly].reverse(), groupData.monthly.releases, created, failed, "month");
+      groupData.monthly.status = 'success';
+      groupData.monthly.created = created.length - beforeCount;
+    }
+
+    if (groupData.quarterly.status === 'fetched') {
+      log.info(`📅 Seeding quarterly releases...`);
+      const beforeCount = created.length;
+      await ensureSeedForGroup(RG_IDS.quarterly, [...quarterly].reverse(), groupData.quarterly.releases, created, failed, "quarter");
+      groupData.quarterly.status = 'success';
+      groupData.quarterly.created = created.length - beforeCount;
+    }
+
+    if (groupData.yearly.status === 'fetched') {
+      log.info(`📅 Seeding yearly releases...`);
+      const beforeCount = created.length;
+      await ensureSeedForGroup(RG_IDS.yearly, [...yearly].reverse(), groupData.yearly.releases, created, failed, "year");
+      groupData.yearly.status = 'success';
+      groupData.yearly.created = created.length - beforeCount;
+    }
+
+    // Calculate summary
+    const successfulGroups = Object.values(groupData).filter(g => g.status === 'success').length;
+    const failedGroups = 4 - successfulGroups;
+    const totalCreated = created.length;
+    const totalFailed = failed.length;
+
+    // Determine overall status
+    const overallStatus = successfulGroups === 4 ? 'success' :
+                         successfulGroups > 0 ? 'partial_success' : 'failed';
+
+    log.info(`✅ Seeding complete: ${successfulGroups}/4 groups succeeded, ${totalCreated} releases created, ${totalFailed} failures`);
+
+    // Return detailed response
     res.status(200).json({
+      status: overallStatus,
       rangeStart: isoString(rangeStart),
       rangeEnd: isoString(rangeEnd),
-      createdCount: created.length,
+      summary: {
+        totalGroups: 4,
+        successfulGroups,
+        failedGroups,
+        createdCount: totalCreated,
+        failedCreations: totalFailed
+      },
+      groups: Object.fromEntries(
+        Object.entries(groupData).map(([k, v]) => [
+          k,
+          {
+            status: v.status,
+            created: v.created || 0,
+            error: v.error || null
+          }
+        ])
+      ),
       createdNames: created.map(c => c.name),
+      ...(totalFailed > 0 && { failedCreations: failed })
     });
   } catch (e) {
     log.err("Seeder failed:", e?.message);
-    res.status(500).send("failed");
+    res.status(500).json({
+      status: "error",
+      error: e?.message || "Internal server error"
+    });
   }
 });
 
