@@ -377,7 +377,7 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
 
     try {
       // Fetch existing relationships for this feature
-      const existingRels = await fetch(`${PB_BASE}/entities/${feature.id}/relationships/link`, {
+      const existingRels = await fetch(`${PB_BASE}/entities/${feature.id}/relationships?type=link`, {
         headers: COMMON_HEADERS
       });
 
