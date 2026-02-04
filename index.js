@@ -292,18 +292,71 @@ async function ensureSeedForGroup(groupId, periods, existingReleases, createdAcc
 
 /** Ensure exactly one assignment within a group based on feature.timeframe.end (day-only semantics) */
 async function upsertAssignmentForGroup(feature, groupLabel, cache) {
-  const featureEnd = parseIsoDate(feature.timeframe?.endDate || feature.timeframe?.end);
-  if (!featureEnd) {
-    log.warn(`🎯 ${groupLabel}: feature has no timeframe.end; skipping assignment`);
-    return;
-  }
-
   const groupId = RG_IDS[groupLabel];
   if (!groupId) {
-    log.warn(`🎯 ${groupLabel}: Missing release group ID (check environment variables); skipping assignment`);
+    log.warn(`🎯 ${groupLabel}: Missing release group ID (check environment variables); skipping`);
     return;
   }
 
+  const featureEnd = parseIsoDate(feature.timeframe?.endDate || feature.timeframe?.end);
+
+  // If no timeframe, unassign from all releases in this group
+  if (!featureEnd) {
+    log.info(`🎯 ${groupLabel}: feature has no timeframe.end; unassigning from all releases in group`);
+
+    try {
+      // Fetch existing relationships for this feature
+      const existingRels = await fetch(`${PB_BASE}/entities/${feature.id}/relationships/link`, {
+        headers: COMMON_HEADERS
+      });
+
+      if (!existingRels.ok) {
+        log.warn(`🎯 ${groupLabel}: Failed to fetch existing relationships (${existingRels.status}); skipping cleanup`);
+        return;
+      }
+
+      const rels = (await existingRels.json()).data || [];
+
+      // Fetch releases in this group to identify which relationships belong to this group
+      let releases = cache[groupId];
+      if (!releases) {
+        releases = await listReleasesForGroup(groupId);
+        cache[groupId] = releases;
+        dbg(`🎯 ${groupLabel}: Fetched ${releases.length} releases for cleanup`);
+      }
+
+      const groupReleaseIds = new Set(releases.map(r => r.id));
+
+      // Unassign only from releases in this group
+      let unassignedCount = 0;
+      for (const rel of rels) {
+        if (groupReleaseIds.has(rel.target.id)) {
+          try {
+            await fetch(`${PB_BASE}/entities/${feature.id}/relationships/link/${rel.target.id}`, {
+              method: "DELETE",
+              headers: COMMON_HEADERS
+            });
+            unassignedCount++;
+            dbg(`🧹 ${groupLabel}: Unassigned from release ${rel.target.id}`);
+          } catch (err) {
+            log.warn(`🧹 ${groupLabel}: Failed to unassign from ${rel.target.id}: ${err.message}`);
+          }
+        }
+      }
+
+      if (unassignedCount > 0) {
+        log.info(`🧹 ${groupLabel}: Unassigned from ${unassignedCount} release(s)`);
+      } else {
+        dbg(`🎯 ${groupLabel}: No releases to unassign`);
+      }
+    } catch (err) {
+      log.warn(`🎯 ${groupLabel}: Cleanup failed (${err.message}); skipping`);
+    }
+
+    return;
+  }
+
+  // Normal assignment flow when timeframe exists
   let releases = cache[groupId];
   if (!releases) {
     try {

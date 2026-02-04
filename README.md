@@ -15,6 +15,7 @@ This service:
 - ✅ **Async webhook processing** - Fast response times prevent timeout duplicates
 - ✅ **Graceful degradation** - Continues if some release groups fail
 - ✅ **Feedback loop prevention** - Ignores assignment-triggered webhooks
+- ✅ **Automatic cleanup** - Unassigns features from all releases when timeframe is removed
 - ✅ **Flexible quarterly anchors** - Support for fiscal years
 - ✅ **Structured logging** - JSON logs for production, pretty logs for development
 - ✅ **UTC-normalized** - Day-only semantics, no timezone drift
@@ -378,6 +379,12 @@ Productboard → Webhook → Auth → Validation → 200 OK (immediate)
 - **Day-only semantics**: Times are ignored, only dates matter
 - **Week numbering**: Weeks start Monday, numbered within month
 - **Quarter anchoring**: Configurable fiscal year support via `QUARTER_START_MONTH`
+
+### Assignment Logic
+
+- **With timeframe**: Features are assigned to the matching release in each granularity (weekly/monthly/quarterly/yearly) based on the feature's end date. Previous assignments in that group are automatically removed.
+- **Without timeframe**: When a feature's timeframe is removed (no end date), the service automatically unassigns the feature from all releases in all granularities. This ensures features without timeframes aren't left in time-based releases.
+- **Efficient cleanup**: Only releases that are actually assigned get unassigned, minimizing API calls.
 
 ### Logging
 
