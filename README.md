@@ -13,7 +13,7 @@ This service:
 ## Features
 
 - ✅ **Async webhook processing** - Fast response times prevent timeout duplicates
-- ✅ **Deduplication** - Prevents duplicate processing of the same webhook within 5 minutes
+- ✅ **Smart deduplication** - Prevents duplicate webhooks while allowing rapid timeframe changes
 - ✅ **Graceful degradation** - Continues if some release groups fail
 - ✅ **Feedback loop prevention** - Ignores assignment-triggered webhooks
 - ✅ **Automatic cleanup** - Unassigns features from all releases when timeframe is removed
@@ -318,9 +318,13 @@ Check debug output for available release timeframes. Verify feature end date fal
 
 **Check logs for**:
 ```
-🔄 Duplicate webhook detected (original: abc-123, 4500ms ago), skipping
+🔄 Duplicate webhook detected (original: abc-123, 4500ms ago, timeframe: 2026-09-30), skipping
 ```
-**Solution**: The service automatically deduplicates webhooks for the same feature within a 5-minute window. Duplicate webhooks are logged and ignored. This prevents double-processing when Productboard sends duplicate events.
+**Solution**: The service uses **smart deduplication** that includes the timeframe in the dedup key. This means:
+- ✅ Duplicate webhooks with the SAME timeframe → Blocked (prevents double-processing)
+- ✅ Multiple webhooks with DIFFERENT timeframes → Processed (allows rapid corrections)
+
+Example: If a user sets Sept 30, then changes to Oct 15 within seconds, BOTH updates will be processed because they have different timeframes.
 
 ---
 

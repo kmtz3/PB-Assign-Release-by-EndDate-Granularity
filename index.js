@@ -111,16 +111,18 @@ setInterval(() => {
 
 /**
  * Get deduplication key for a feature webhook
+ * Includes timeframe to allow different timeframe changes to be processed
  */
-function getDedupKey(featureId, eventType) {
-  return `${featureId}:${eventType}`;
+function getDedupKey(featureId, eventType, timeframeEnd = null) {
+  const timeframeStr = timeframeEnd || 'null';
+  return `${featureId}:${eventType}:${timeframeStr}`;
 }
 
 /**
  * Check if a webhook is currently being processed or was recently processed
  */
-function isProcessing(featureId, eventType) {
-  const key = getDedupKey(featureId, eventType);
+function isProcessing(featureId, eventType, timeframeEnd = null) {
+  const key = getDedupKey(featureId, eventType, timeframeEnd);
   const entry = processingCache.get(key);
   if (!entry) return null;
 
@@ -136,19 +138,20 @@ function isProcessing(featureId, eventType) {
 /**
  * Mark a feature webhook as being processed
  */
-function markProcessing(featureId, eventType, requestId) {
-  const key = getDedupKey(featureId, eventType);
+function markProcessing(featureId, eventType, timeframeEnd, requestId) {
+  const key = getDedupKey(featureId, eventType, timeframeEnd);
   processingCache.set(key, {
     timestamp: Date.now(),
-    requestId
+    requestId,
+    timeframeEnd
   });
 }
 
 /**
  * Remove processing mark for a feature webhook
  */
-function unmarkProcessing(featureId, eventType) {
-  const key = getDedupKey(featureId, eventType);
+function unmarkProcessing(featureId, eventType, timeframeEnd = null) {
+  const key = getDedupKey(featureId, eventType, timeframeEnd);
   processingCache.delete(key);
 }
 
@@ -683,18 +686,7 @@ app.post("/pb-webhook", requireAuth, async (req, res) => {
       return res.status(400).send("bad payload (no feature id)");
     }
 
-    // 5) Check for duplicate webhook (deduplication)
-    const existingProcess = isProcessing(featureId, eventType);
-    if (existingProcess) {
-      const timeSince = Date.now() - existingProcess.timestamp;
-      reqLog.info(`🔄 Duplicate webhook detected (original: ${existingProcess.requestId}, ${timeSince}ms ago), skipping`);
-      return res.status(200).send("duplicate - already processing");
-    }
-
-    // 6) Mark as processing to prevent duplicates
-    markProcessing(featureId, eventType, req.id);
-
-    // 7) All validation passed - respond immediately and process async
+    // 5) All validation passed - respond immediately and process async
     const dt = Date.now() - t0;
     reqLog.info(`✅ Webhook accepted for processing (${dt} ms)`);
 
@@ -702,12 +694,10 @@ app.post("/pb-webhook", requireAuth, async (req, res) => {
     res.status(200).send("accepted");
 
     // Process asynchronously (don't await) - pass requestId for correlation
+    // Deduplication happens after fetching feature (so we have timeframe)
     processWebhookAsync(body, featureId, eventType, req.id).catch(err => {
       // Catch any unhandled errors from async processing
       reqLog.err("Unhandled error in async webhook processing:", err?.message);
-    }).finally(() => {
-      // Clean up deduplication marker after processing completes
-      unmarkProcessing(featureId, eventType);
     });
   } catch (err) {
     const dt = Date.now() - t0;
@@ -729,12 +719,29 @@ async function processWebhookAsync(body, featureId, eventType, requestId) {
     err: (msg, ...args) => logger.error({ ...formatLogArgs(args), requestId }, msg),
   };
 
+  let timeframeEnd = null;
+
   try {
     // 1) Fetch latest feature (thin payloads)
     const feature = await getFeature(featureId);
     reqLog.link(`🔗 Feature: ${feature.links?.html ?? feature.links?.self ?? feature.id}`);
 
-    // 2) Assign within each group (day-only, closed interval)
+    // 2) Extract timeframe for deduplication
+    const featureEndDate = feature.timeframe?.endDate || feature.timeframe?.end;
+    timeframeEnd = featureEndDate || null;
+
+    // 3) Check for duplicate webhook (now that we have timeframe)
+    const existingProcess = isProcessing(featureId, eventType, timeframeEnd);
+    if (existingProcess) {
+      const timeSince = Date.now() - existingProcess.timestamp;
+      reqLog.info(`🔄 Duplicate webhook detected (original: ${existingProcess.requestId}, ${timeSince}ms ago, timeframe: ${timeframeEnd}), skipping`);
+      return; // Early exit - don't process duplicate
+    }
+
+    // 4) Mark as processing to prevent duplicates
+    markProcessing(featureId, eventType, timeframeEnd, requestId);
+
+    // 5) Assign within each group (day-only, closed interval)
     const cache = {};
     await upsertAssignmentForGroup(feature, "weekly", cache);
     await upsertAssignmentForGroup(feature, "monthly", cache);
@@ -748,6 +755,11 @@ async function processWebhookAsync(body, featureId, eventType, requestId) {
     reqLog.err("Async processing error:", err?.message, `(${dt} ms)`);
     // Note: We can't respond to webhook here since response was already sent
     // Error is logged but processing continues for other webhooks
+  } finally {
+    // Clean up deduplication marker after processing completes (or on error)
+    if (timeframeEnd !== null || timeframeEnd === null) {
+      unmarkProcessing(featureId, eventType, timeframeEnd);
+    }
   }
 }
 
