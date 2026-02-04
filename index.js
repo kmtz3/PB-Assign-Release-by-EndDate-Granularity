@@ -385,7 +385,8 @@ async function upsertAssignmentForGroup(feature, groupLabel, cache) {
   }
 
   // setFeatureAssignment with assigned=true automatically removes old assignments in this group
-  await setFeatureAssignment(feature.id, target.id, true, groupId);
+  // Pass cached releases to avoid refetching
+  await setFeatureAssignment(feature.id, target.id, true, groupId, releases);
   log.info(`✅ Assigned to ${groupLabel} → ${target.name} (${target.id})`);
 }
 
@@ -498,7 +499,7 @@ async function listReleasesForGroupV2(groupId) {
 }
 
 /** Assign or unassign a feature to a release */
-async function setFeatureAssignmentV2(featureId, releaseId, assigned, groupId) {
+async function setFeatureAssignmentV2(featureId, releaseId, assigned, groupId, groupReleases = null) {
   if (assigned) {
     // First, remove any existing release links in this group
     const existingRels = await fetch(`${PB_BASE}/entities/${featureId}/relationships?type=link`, {
@@ -507,7 +508,10 @@ async function setFeatureAssignmentV2(featureId, releaseId, assigned, groupId) {
     if (existingRels.ok) {
       const rels = (await existingRels.json()).data || [];
       // Get all releases in this group to identify which relationships to remove
-      const groupReleases = await listReleasesForGroupV2(groupId);
+      // Use provided groupReleases if available, otherwise fetch
+      if (!groupReleases) {
+        groupReleases = await listReleasesForGroupV2(groupId);
+      }
       const groupReleaseIds = new Set(groupReleases.map(r => r.id));
 
       for (const rel of rels) {
@@ -558,8 +562,8 @@ async function listReleasesForGroup(groupId) {
   return listReleasesForGroupV2(groupId);
 }
 
-async function setFeatureAssignment(featureId, releaseId, assigned, groupId) {
-  return setFeatureAssignmentV2(featureId, releaseId, assigned, groupId);
+async function setFeatureAssignment(featureId, releaseId, assigned, groupId, groupReleases = null) {
+  return setFeatureAssignmentV2(featureId, releaseId, assigned, groupId, groupReleases);
 }
 
 // --- Webhook receiver ---
