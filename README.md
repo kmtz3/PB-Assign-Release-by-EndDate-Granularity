@@ -13,6 +13,7 @@ This service:
 ## Features
 
 - ✅ **Async webhook processing** - Fast response times prevent timeout duplicates
+- ✅ **Deduplication** - Prevents duplicate processing of the same webhook within 5 minutes
 - ✅ **Graceful degradation** - Continues if some release groups fail
 - ✅ **Feedback loop prevention** - Ignores assignment-triggered webhooks
 - ✅ **Automatic cleanup** - Unassigns features from all releases when timeframe is removed
@@ -317,9 +318,17 @@ Check debug output for available release timeframes. Verify feature end date fal
 
 **Check logs for**:
 ```
+🔄 Duplicate webhook detected (original: abc-123, 4500ms ago), skipping
+```
+**Solution**: The service automatically deduplicates webhooks for the same feature within a 5-minute window. Duplicate webhooks are logged and ignored. This prevents double-processing when Productboard sends duplicate events.
+
+---
+
+**Legacy check - if you see long processing times**:
+```
 ✅ Webhook accepted for processing (22500 ms)
 ```
-**Solution**: If response time > 20s, Productboard may retry. This was fixed with async processing. Ensure you're running latest version.
+**Solution**: If response time > 20s, Productboard may retry. This should be resolved with async processing and performance optimizations. Check that you're running the latest version.
 
 ### Memory issues
 
